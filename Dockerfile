@@ -1,35 +1,29 @@
-name: Build and Publish Docker Image
+FROM node:18-slim
 
-on:
-  push:
-    branches: ["main", "release"] # This triggers the build when you push to main or release
+# Install dependencies and Google Chrome
+RUN apt-get update && apt-get install -y \
+    wget \
+    gnupg \
+    ca-certificates \
+    apt-transport-https \
+    && wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add - \
+    && sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google.list' \
+    && apt-get update \
+    && apt-get install -y google-chrome-stable fonts-ipafont-gothic fonts-wqy-zenhei fonts-freefont-ttf libxss1 --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/*
 
-jobs:
-  build-and-push:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write # This allows GitHub to save the image to your profile
+WORKDIR /app
 
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
+# Install dependencies
+COPY package*.json ./
+RUN npm install --only=production
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+# Copy application files
+COPY app.js ./
 
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+# Environment Defaults
+ENV IS_DOCKER=true
+ENV PIXAI_COOKIE=""
+ENV APP_LANG="en-GB"
 
-      - name: Build and Push Image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./Dockerfile
-          push: true
-          # This automatically tags it as ghcr.io/markld95/auto-pixai:latest
-          tags: ghcr.io/${{ github.repository }}:latest
+CMD ["node", "app.js"]

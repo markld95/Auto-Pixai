@@ -22,9 +22,9 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push Docker image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6  # Updated to v6
         with:
           context: .
           push: true
-          # Note: 'auto-pixai' MUST be lowercase here
+          # Note: lowercase name to avoid the previous error
           tags: ghcr.io/markld95/auto-pixai:latest
