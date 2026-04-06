@@ -9,8 +9,7 @@
     <a href="https://hub.docker.com/r/smile0301/auto-pixai"><img src="https://img.shields.io/github/v/release/Mr-Smilin/auto-pixai?style=flat-square&label=version&color=orange"></a>
 </p>
 
-Automatically claim daily rewards on pixai.art  
-[中文自述在這裡](./readme.md)
+Automatically claim daily rewards on pixai.art
 
 ## Getting Started
 
