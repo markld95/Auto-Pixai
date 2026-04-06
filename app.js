@@ -14,7 +14,7 @@ function delay(time) {
 
 async function applyCookies(page) {
     if (!COOKIE_STRING) {
-        console.error("[ERROR] No PIXAI_COOKIE found in environment variables.");
+        console.error("[ERROR] No PIXAI_COOKIE found.");
         return;
     }
     const cookies = COOKIE_STRING.split(";").map(c => {
@@ -30,71 +30,15 @@ async function applyCookies(page) {
     console.log("[AUTH] Cookies applied to session.");
 }
 
-async function smartClaim(page) {
-    console.log("[PROCESS] Starting Smart Search for claim buttons...");
-    
-    // Give the page 5 seconds to load any annoying popups
-    await delay(5000);
-
-    const result = await page.evaluate(() => {
-        // List of keywords PixAI uses for daily rewards
-        const keywords = ['claim', 'get', 'collect', 'check-in', 'receive', 'daily', 'credits'];
-        
-        // Find all clickable elements
-        const elements = Array.from(document.querySelectorAll('button, a, div[role="button"], span'));
-        
-        // Filter for elements that contain our keywords and are actually visible
-        const target = elements.find(el => {
-            const text = el.innerText.toLowerCase();
-            const isVisible = el.offsetWidth > 0 && el.offsetHeight > 0;
-            return keywords.some(k => text.includes(k)) && isVisible;
-        });
-
-        if (target) {
-            target.click();
-            return { success: true, text: target.innerText.trim() };
-        }
-        return { success: false };
-    });
-
-    if (result.success) {
-        console.log(`[SUCCESS] Found and clicked: "${result.text}"`);
-        await delay(2000); // Wait for click to register
-    } else {
-        console.log("[NOTICE] No claim button found in popup. Trying fallback navigation...");
-        // Fallback: Go directly to the credit page if the popup didn't show
-        await page.goto("https://pixai.art/generator/credit", { waitUntil: "networkidle2" });
-        await delay(3000);
-        
-        // Try one more search on the credit page
-        const fallbackResult = await page.evaluate(() => {
-            const btns = Array.from(document.querySelectorAll('button'));
-            const claimBtn = btns.find(b => b.innerText.toLowerCase().includes('claim'));
-            if (claimBtn) { claimBtn.click(); return true; }
-            return false;
-        });
-        
-        if (fallbackResult) {
-            console.log("[SUCCESS] Claimed via Credits page fallback.");
-        } else {
-            console.log("[CRITICAL] All claim methods failed. Button might not be available yet.");
-        }
-    }
-}
-
 async function run() {
-    console.log("[INFO] Starting PixAI Auto-Claimer (Plan B)...");
+    console.log("[INFO] Starting PixAI Auto-Claimer...");
 
     const config = { 
         headless: "new",
         executablePath: isDocker ? "/usr/bin/google-chrome" : undefined,
         args: isDocker ? [
-            "--disable-gpu", 
-            "--disable-setuid-sandbox", 
-            "--no-sandbox", 
-            "--no-zygote", 
-            "--disable-dev-shm-usage",
-            `--lang=${LANG}`
+            "--disable-gpu", "--disable-setuid-sandbox", "--no-sandbox", 
+            "--no-zygote", "--disable-dev-shm-usage", `--lang=${LANG}`
         ] : []
     };
 
@@ -107,12 +51,36 @@ async function run() {
         await page.goto(url, { waitUntil: "networkidle2" });
         
         await applyCookies(page);
-        
-        // Reload to ensure login state is active
         await page.reload({ waitUntil: "networkidle2" });
-        console.log("[AUTH] Session active.");
+        console.log("[AUTH] Session active. Waiting for daily popup...");
 
-        await smartClaim(page);
+        // Wait 8 seconds for the popup to trigger and animate
+        await delay(8000);
+
+        const result = await page.evaluate(() => {
+            const keywords = ['claim', 'get', 'collect', 'check-in', 'receive'];
+            const buttons = Array.from(document.querySelectorAll('button, div[role="button"]'));
+            
+            // Find a visible button containing one of our keywords
+            const target = buttons.find(btn => {
+                const text = btn.innerText.toLowerCase();
+                const isVisible = btn.offsetWidth > 0 && btn.offsetHeight > 0;
+                return keywords.some(k => text.includes(k)) && isVisible;
+            });
+
+            if (target) {
+                target.click();
+                return { success: true, text: target.innerText.trim() };
+            }
+            return { success: false };
+        });
+
+        if (result.success) {
+            console.log(`[SUCCESS] Found and clicked: "${result.text}"`);
+            await delay(2000); 
+        } else {
+            console.log("[CRITICAL] No claim button appeared. Already claimed or popup blocked.");
+        }
 
     } catch (error) {
         console.error("[FATAL ERROR]", error.message);
