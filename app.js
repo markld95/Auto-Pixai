@@ -70,15 +70,11 @@ async function run() {
 
         await page.screenshot({ path: `${shotPath}1_before_claim.png`, fullPage: true });
 
-        // --- NEW STRATEGY: Deep Shadow DOM Search ---
         console.log("[PROCESS] Piercing Shadow DOM to find Turnstile...");
         const rect = await page.evaluate(() => {
             function findInShadow(root, selector) {
-                // Check current root
                 const el = root.querySelector(selector);
                 if (el) return el;
-                
-                // Search all children and their shadows
                 const children = root.querySelectorAll('*');
                 for (const child of children) {
                     if (child.shadowRoot) {
@@ -88,10 +84,7 @@ async function run() {
                 }
                 return null;
             }
-
-            // Look for any iframe with cloudflare/turnstile in the URL
             const iframe = findInShadow(document, 'iframe[src*="cloudflare"], iframe[src*="turnstile"]');
-            
             if (!iframe) return null;
             const box = iframe.getBoundingClientRect();
             return { x: box.left, y: box.top, width: box.width, height: box.height };
@@ -99,23 +92,17 @@ async function run() {
 
         if (rect && rect.width > 0) {
             console.log(`[AUTH] Target found at (${Math.round(rect.x)}, ${Math.round(rect.y)}). Clicking...`);
-            
-            // Offset to hit the checkbox (approx 35px from left of iframe)
             const clickX = Math.round(rect.x + 35);
             const clickY = Math.round(rect.y + (rect.height / 2));
-            
-            await page.mouse.click(clickX, clickY, { delay: 200 });
-            console.log("[AUTH] Click dispatched. Waiting 8s for processing...");
+            await page.mouse.click(clickX, clickY, { delay: 250 });
             await delay(8000); 
         } else {
-            console.log("[WARN] Turnstile not found. Trying "Center-of-Modal" blind click fallback...");
-            // As a last resort, we click where the checkbox is USUALLY located in this specific modal
-            // Based on your 1280x1024 screenshots, the box is approx at x:470, y:700
-            await page.mouse.click(470, 705, { delay: 200 });
+            console.log("[WARN] Turnstile not found. Trying coordinate-blind fallback...");
+            // Coordinate fallback based on your screenshots (1280x1024 viewport)
+            await page.mouse.click(470, 705, { delay: 250 });
             await delay(8000);
         }
 
-        // 4. Click the "Claim" Button
         console.log("[PROCESS] Checking Claim button status...");
         const claimResult = await page.evaluate(() => {
             const btns = Array.from(document.querySelectorAll('button'));
