@@ -1,12 +1,18 @@
 require('dotenv').config();
 const puppeteer = require("puppeteer-extra");
 const StealthPlugin = require("puppeteer-extra-plugin-stealth");
+const fs = require('fs');
 puppeteer.use(StealthPlugin());
 
 const url = "https://pixai.art";
 const COOKIE_STRING = process.env.PIXAI_COOKIE || "";
 const isDocker = process.env.IS_DOCKER !== 'false';
 const LANG = process.env.APP_LANG || "en-GB";
+
+// Ensure screenshot directory exists in Docker
+if (isDocker && !fs.existsSync('/screenshots')) {
+    fs.mkdirSync('/screenshots', { recursive: true });
+}
 
 function delay(time) {
     return new Promise((resolve) => setTimeout(resolve, time));
@@ -31,7 +37,7 @@ async function applyCookies(page) {
 }
 
 async function run() {
-    console.log("[INFO] Starting PixAI Auto-Claimer...");
+    console.log("[INFO] Starting PixAI Auto-Claimer (Resilient Mode)...");
 
     const config = { 
         headless: "new",
@@ -44,6 +50,9 @@ async function run() {
 
     const browser = await puppeteer.launch(config);
     const page = await browser.newPage();
+    
+    // Set a realistic Window size to help popups render correctly
+    await page.setViewport({ width: 1280, height: 800 });
     await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36");
 
     try {
@@ -52,34 +61,48 @@ async function run() {
         
         await applyCookies(page);
         await page.reload({ waitUntil: "networkidle2" });
-        console.log("[AUTH] Session active. Waiting for daily popup...");
+        console.log("[AUTH] Session active. Waiting for popup to clear Cloudflare...");
 
-        // Wait 8 seconds for the popup to trigger and animate
-        await delay(8000);
+        let claimed = false;
+        const maxAttempts = 15; // 15 attempts * 2 seconds = 30 seconds total wait
 
-        const result = await page.evaluate(() => {
-            const keywords = ['claim', 'get', 'collect', 'check-in', 'receive'];
-            const buttons = Array.from(document.querySelectorAll('button, div[role="button"]'));
+        for (let i = 0; i < maxAttempts; i++) {
+            console.log(`[PROCESS] Scan attempt ${i + 1}/${maxAttempts}...`);
             
-            // Find a visible button containing one of our keywords
-            const target = buttons.find(btn => {
-                const text = btn.innerText.toLowerCase();
-                const isVisible = btn.offsetWidth > 0 && btn.offsetHeight > 0;
-                return keywords.some(k => text.includes(k)) && isVisible;
+            claimed = await page.evaluate(() => {
+                const keywords = ['claim', 'get', 'collect', 'check-in', 'receive'];
+                // Search for buttons or any clickable div containing keywords
+                const elements = Array.from(document.querySelectorAll('button, div[role="button"], span'));
+                
+                const target = elements.find(el => {
+                    const text = el.innerText.toLowerCase();
+                    const isVisible = el.offsetWidth > 0 && el.offsetHeight > 0;
+                    // Ensure the text contains a keyword and actually looks like a button
+                    return keywords.some(k => text.includes(k)) && isVisible;
+                });
+
+                if (target) {
+                    target.click();
+                    return true;
+                }
+                return false;
             });
 
-            if (target) {
-                target.click();
-                return { success: true, text: target.innerText.trim() };
+            if (claimed) {
+                console.log("[SUCCESS] Claim button found and clicked!");
+                await delay(3000); // Wait for the click to process
+                break;
             }
-            return { success: false };
-        });
 
-        if (result.success) {
-            console.log(`[SUCCESS] Found and clicked: "${result.text}"`);
-            await delay(2000); 
-        } else {
-            console.log("[CRITICAL] No claim button appeared. Already claimed or popup blocked.");
+            await delay(2000); // Wait 2 seconds before next scan
+        }
+
+        if (!claimed) {
+            console.log("[CRITICAL] Claim button not found after 30s. Saving debug screenshot...");
+            if (isDocker) {
+                await page.screenshot({ path: '/screenshots/failure.png', fullPage: true });
+                console.log("[DEBUG] Screenshot saved to /screenshots/failure.png");
+            }
         }
 
     } catch (error) {
