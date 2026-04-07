@@ -19,128 +19,93 @@ function delay(time) {
 }
 
 async function applyCookies(page) {
-    if (!COOKIE_STRING) {
-        console.error("[ERROR] No PIXAI_COOKIE found.");
-        return;
-    }
-
-    let decodedCookies = COOKIE_STRING;
-    
-    // Check if the string is Base64 (common in Docker env vars)
+    if (!COOKIE_STRING) return;
+    let decoded = COOKIE_STRING;
     if (!COOKIE_STRING.includes('\t') && !COOKIE_STRING.includes('=')) {
-        console.log("[AUTH] Base64 detected, decoding...");
-        decodedCookies = Buffer.from(COOKIE_STRING, 'base64').toString('utf-8');
+        decoded = Buffer.from(COOKIE_STRING, 'base64').toString('utf-8');
     }
-
-    const lines = decodedCookies.split('\n');
-    let count = 0;
-
+    const lines = decoded.split('\n');
     for (let line of lines) {
         line = line.trim();
         if (!line || line.startsWith('#')) continue;
-
         const tabs = line.split('\t');
         if (tabs.length >= 7) {
-            const [domain, flag, path, secure, expires, name, value] = tabs;
+            const [domain, , path, secure, , name, value] = tabs;
             await page.setCookie({
-                name: name.trim(),
-                value: value.trim(),
+                name: name.trim(), value: value.trim(),
                 domain: domain.startsWith('.') ? domain : `.${domain}`,
-                path: path,
-                secure: secure.toUpperCase() === 'TRUE',
-                sameSite: 'Lax'
+                path: path, secure: secure.toUpperCase() === 'TRUE', sameSite: 'Lax'
             });
-            count++;
-        } else if (line.includes('=')) {
-            const pairs = line.split(';');
-            for (const pair of pairs) {
-                const [name, ...valParts] = pair.trim().split('=');
-                if (!name || valParts.length === 0) continue;
-                const value = valParts.join('=');
-                const cookieParams = { name: name.trim(), value: value.trim(), path: '/', secure: true, sameSite: 'Lax' };
-                await page.setCookie({ ...cookieParams, domain: '.pixai.art' });
-                await page.setCookie({ ...cookieParams, domain: 'pixai.art' });
-                count++;
-            }
         }
     }
-    console.log(`[AUTH] Successfully applied ${count} cookie parameters.`);
 }
 
 async function run() {
-    console.log("[INFO] Starting PixAI Auto-Claimer (Base64-Fix Mode)...");
-
-    const config = { 
+    console.log("[INFO] Starting PixAI Auto-Claimer (Cloudflare-Solver Mode)...");
+    const browser = await puppeteer.launch({ 
         headless: "new",
         executablePath: isDocker ? "/usr/bin/google-chrome" : undefined,
-        args: isDocker ? [
-            "--disable-gpu", "--disable-setuid-sandbox", "--no-sandbox", 
-            "--no-zygote", "--disable-dev-shm-usage", `--lang=${LANG}`
-        ] : []
-    };
-
-    const browser = await puppeteer.launch(config);
+        args: isDocker ? ["--disable-gpu", "--no-sandbox", "--disable-dev-shm-usage"] : []
+    });
     const page = await browser.newPage();
     await page.setViewport({ width: 1280, height: 1024 });
     await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36");
 
     try {
-        console.log("[NAV] Initializing...");
         await page.goto("https://pixai.art", { waitUntil: "networkidle2" });
-        
         await applyCookies(page);
-        
-        console.log("[NAV] Navigating to Generator with Session...");
+        console.log("[NAV] Navigating to Generator...");
         await page.goto(url, { waitUntil: "networkidle2" });
-        
-        // Wait longer for session to reflect in UI
         await delay(8000);
 
-        let claimed = false;
-        for (let i = 0; i < 15; i++) {
-            console.log(`[PROCESS] Scan attempt ${i + 1}/15...`);
-            
-            const result = await page.evaluate(() => {
-                const keywords = ['claim', 'get', 'collect', 'check-in', 'receive'];
-                const elements = Array.from(document.querySelectorAll('button, div[role="button"], span, a'));
-                
-                const btn = elements.find(el => {
-                    const text = el.innerText.toLowerCase();
-                    const isVisible = el.offsetWidth > 0 && el.offsetHeight > 0;
-                    return keywords.some(k => text.includes(k)) && isVisible && !text.includes('invite') && /\d/.test(text);
-                });
+        // --- STEP 1: BEFORE SCREENSHOT ---
+        if (isDocker) await page.screenshot({ path: `${shotDir}/1_before_claim.png`, fullPage: true });
 
-                if (btn) {
-                    btn.click();
-                    return { success: true, text: btn.innerText.trim() };
-                }
-                return false;
+        // --- STEP 2: CLOUDFLARE CHECK ---
+        console.log("[PROCESS] Checking for Cloudflare checkbox...");
+        const cfHandled = await page.evaluate(async () => {
+            const iframe = document.querySelector('iframe[src*="cloudflare"]');
+            if (iframe) {
+                const rect = iframe.getBoundingClientRect();
+                return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+            }
+            return null;
+        });
+
+        if (cfHandled) {
+            console.log("[AUTH] Cloudflare detected. Attempting to click checkbox...");
+            await page.mouse.click(cfHandled.x, cfHandled.y);
+            await delay(5000); // Wait for Cloudflare to turn green
+        }
+
+        // --- STEP 3: CLAIM LOOP ---
+        let claimed = false;
+        for (let i = 0; i < 10; i++) {
+            console.log(`[PROCESS] Attempt ${i + 1}/10...`);
+            const result = await page.evaluate(() => {
+                const elements = Array.from(document.querySelectorAll('button, div[role="button"], span'));
+                const btn = elements.find(el => {
+                    const t = el.innerText.toLowerCase();
+                    return ['claim', 'get', 'receive'].some(k => t.includes(k)) && 
+                           el.offsetWidth > 0 && !t.includes('invite') && /\d/.test(t);
+                });
+                if (btn) { btn.click(); return btn.innerText.trim(); }
+                return null;
             });
 
-            if (result && result.success) {
-                console.log(`[SUCCESS] Found and clicked: "${result.text}"`);
+            if (result) {
+                console.log(`[SUCCESS] Clicked: "${result}"`);
                 claimed = true;
-                await delay(5000); 
+                await delay(5000);
                 break;
             }
-            await delay(2000); 
+            await delay(3000);
         }
 
-        if (!claimed) console.log("[CRITICAL] Claim button not found.");
+        // --- STEP 4: AFTER SCREENSHOT ---
+        if (isDocker) await page.screenshot({ path: `${shotDir}/2_after_claim.png`, fullPage: true });
 
-    } catch (error) {
-        console.error("[FATAL ERROR]", error.message);
-    } finally {
-        if (isDocker) {
-            await page.screenshot({ path: `${shotDir}/last_run_state.png`, fullPage: true });
-            console.log("[DEBUG] State saved to /screenshots/last_run_state.png");
-        }
-        await browser.close();
-        console.log("[EXIT] Process completed.");
-    }
+    } catch (e) { console.error("[ERROR]", e.message); }
+    finally { await browser.close(); console.log("[EXIT] Done."); }
 }
-
-run().catch(err => {
-    console.error(err);
-    process.exit(1);
-});
+run();
