@@ -11,7 +11,7 @@ const FS_URL = process.env.FLARESOLVERR_URL || "";
 const isDocker = process.env.IS_DOCKER !== 'false';
 const LANG = process.env.APP_LANG || "en-GB";
 
-// Saving directly to /data/ which you mapped to /mnt/user/appdata/auto-pixai
+// Hardcoded to the mount point mapped in Unraid
 const shotPath = "/data/"; 
 
 function delay(time) { return new Promise((resolve) => setTimeout(resolve, time)); }
@@ -51,7 +51,7 @@ async function parseLocalCookies(cookieStr) {
 }
 
 async function run() {
-    console.log(`[INFO] Starting PixAI Auto-Claimer (Turnstile Precision Mode)`);
+    console.log(`[INFO] Starting PixAI Auto-Claimer (Coordinate-Attack Mode)`);
     const browser = await puppeteer.launch({ 
         headless: "new",
         executablePath: isDocker ? "/usr/bin/google-chrome" : undefined,
@@ -64,76 +64,75 @@ async function run() {
     await page.setUserAgent(UA);
 
     try {
-        // 1. Initial Load & Login
+        // 1. Initial Login
         await page.goto("https://pixai.art", { waitUntil: "networkidle2" });
         const localCookies = await parseLocalCookies(COOKIE_STRING);
         await applyCookies(page, localCookies);
         console.log(`[AUTH] Injected ${localCookies.length} user cookies.`);
 
-        // 2. FlareSolverr (For initial bypass if needed)
-        if (FS_URL) {
-            try {
-                const fsRes = await axios.post(FS_URL, { cmd: "sessions.create", url: "https://pixai.art", maxTimeout: 60000 });
-                if (fsRes.data.solution) await applyCookies(page, fsRes.data.solution.cookies);
-            } catch (e) { console.warn("[WARN] FlareSolverr skipped/failed."); }
-        }
-
-        // 3. Navigate to Generator and wait for Popup
+        // 2. Navigate and wait for popup
         console.log("[NAV] Navigating to Generator...");
         await page.goto(url, { waitUntil: "networkidle2" });
-        await delay(10000); 
+        await delay(12000); // Increased wait for popup stability
 
         // BEFORE SCREENSHOT
         await page.screenshot({ path: `${shotPath}1_before_claim.png`, fullPage: true });
 
-        // 4. Handle Cloudflare Turnstile inside the Popup
-        console.log("[PROCESS] Hunting for Cloudflare Turnstile frame...");
-        const frames = page.frames();
-        const cfFrame = frames.find(f => f.url().includes('cloudflare') || f.url().includes('turnstile'));
+        // 3. Handle Cloudflare via Coordinate Click
+        console.log("[PROCESS] Hunting for Turnstile iframe...");
+        const cfFrameElement = await page.$('iframe[src*="cloudflare"], iframe[src*="turnstile"]');
 
-        if (cfFrame) {
-            console.log("[AUTH] Turnstile frame found. Attempting to click checkbox...");
-            try {
-                // Find the checkbox container inside the frame
-                const checkbox = await cfFrame.waitForSelector('#challenge-stage', { timeout: 8000 });
-                if (checkbox) {
-                    const rect = await checkbox.boundingBox();
-                    if (rect) {
-                        // Use physical mouse click at coordinates
-                        await page.mouse.click(rect.x + rect.width / 2, rect.y + rect.height / 2);
-                        console.log("[AUTH] Checkbox clicked. Waiting for validation...");
-                        await delay(6000); // Wait for button to enable
-                    }
-                }
-            } catch (e) {
-                console.log("[INFO] Could not click checkbox (it may be auto-solving).");
+        if (cfFrameElement) {
+            console.log("[AUTH] Turnstile iframe detected. Calculating click coordinates...");
+            const rect = await cfFrameElement.boundingBox();
+            if (rect) {
+                // The checkbox is on the left side of the widget.
+                // We click 35 pixels from the left and dead-center vertically.
+                const clickX = rect.x + 35;
+                const clickY = rect.y + (rect.height / 2);
+                
+                // Perform a human-like move and click
+                await page.mouse.move(clickX, clickY);
+                await page.mouse.down();
+                await delay(150);
+                await page.mouse.up();
+                
+                console.log(`[AUTH] Dispatched click to (${clickX}, ${clickY}). Waiting 8s for verification...`);
+                await delay(8000); 
             }
+        } else {
+            console.log("[INFO] No Cloudflare iframe found. It may be auto-solved.");
         }
 
-        // 5. Click the "Claim" Button
-        console.log("[PROCESS] Attempting to click the Claim button...");
+        // 4. Click the "Claim" Button
+        console.log("[PROCESS] Scanning for enabled Claim button...");
         const claimResult = await page.evaluate(() => {
             const btns = Array.from(document.querySelectorAll('button'));
+            // Look for the specific text from your screenshot
             const claimBtn = btns.find(b => b.innerText.toLowerCase().includes('claim 12,000'));
-            if (claimBtn && !claimBtn.disabled) {
-                claimBtn.click();
-                return claimBtn.innerText.trim();
+            
+            if (claimBtn) {
+                if (!claimBtn.disabled) {
+                    claimBtn.click();
+                    return "CLICKED";
+                }
+                return "FOUND_BUT_DISABLED";
             }
-            return null;
+            return "NOT_FOUND";
         });
 
-        if (claimResult) {
-            console.log(`[SUCCESS] Claimed: ${claimResult}`);
-            await delay(5000);
-        } else {
-            console.log("[FAIL] Claim button was not found, not enabled, or already clicked.");
+        console.log(`[PROCESS] Button Status: ${claimResult}`);
+        if (claimResult === "CLICKED") {
+            await delay(4000);
+            console.log("[SUCCESS] Credits should be claimed.");
         }
 
         // AFTER SCREENSHOT
         await page.screenshot({ path: `${shotPath}2_after_claim.png`, fullPage: true });
 
-    } catch (e) { console.error("[FATAL ERROR]", e.message); }
-    finally { 
+    } catch (e) { 
+        console.error("[FATAL ERROR]", e.message); 
+    } finally { 
         await browser.close(); 
         console.log("[EXIT] Done."); 
     }
