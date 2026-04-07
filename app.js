@@ -49,7 +49,7 @@ async function parseLocalCookies(cookieStr) {
 }
 
 async function run() {
-    console.log(`[INFO] Starting PixAI Auto-Claimer (Popup-Wait Mode)`);
+    console.log(`[INFO] Starting PixAI Auto-Claimer (Frame-Detection Mode)`);
     const browser = await puppeteer.launch({ 
         headless: "new",
         executablePath: isDocker ? "/usr/bin/google-chrome" : undefined,
@@ -65,50 +65,48 @@ async function run() {
         await page.goto("https://pixai.art", { waitUntil: "networkidle2" });
         const localCookies = await parseLocalCookies(COOKIE_STRING);
         await applyCookies(page, localCookies);
-        console.log(`[AUTH] Injected ${localCookies.length} user cookies.`);
 
         console.log("[NAV] Navigating to Generator...");
         await page.goto(url, { waitUntil: "networkidle2" });
         
-        // --- NEW: WAIT FOR POPUP CONTENT ---
-        console.log("[PROCESS] Waiting for Daily Claim popup to render...");
-        await delay(10000); 
+        // Wait for the popup to be fully settled
+        await delay(12000); 
 
-        // BEFORE SCREENSHOT
+        // BEFORE SCREENSHOT (Proof it's there)
         await page.screenshot({ path: `${shotPath}1_before_claim.png`, fullPage: true });
 
-        // 3. Handle Cloudflare via Coordinate Click with RETRY
-        console.log("[PROCESS] Searching for Turnstile iframe...");
-        let cfFrameElement = null;
-        
-        // Try to find the iframe up to 5 times
-        for (let i = 0; i < 5; i++) {
-            cfFrameElement = await page.$('iframe[src*="cloudflare"], iframe[src*="turnstile"]');
-            if (cfFrameElement) break;
-            console.log(`[INFO] Iframe not found, retrying... (${i+1}/5)`);
-            await delay(3000);
-        }
+        // --- NEW STRATEGY: Find frame by URL instead of Selector ---
+        console.log("[PROCESS] Scanning for Cloudflare frame via URL...");
+        const allFrames = page.frames();
+        const cfFrame = allFrames.find(f => f.url().includes('cloudflare.com') && f.url().includes('turnstile'));
 
-        if (cfFrameElement) {
-            console.log("[AUTH] Turnstile iframe detected. Performing precision click...");
-            const rect = await cfFrameElement.boundingBox();
+        if (cfFrame) {
+            console.log("[AUTH] Cloudflare frame found via URL. Targeting coordinates...");
+            
+            // Get the frame's container element to find where it is on the screen
+            const frameElement = await cfFrame.frameElement();
+            const rect = await frameElement.boundingBox();
+
             if (rect) {
-                const clickX = rect.x + 35;
+                // Click the left side of the widget where the checkbox is
+                const clickX = rect.x + 40; 
                 const clickY = rect.y + (rect.height / 2);
                 
-                await page.mouse.click(clickX, clickY, { delay: 150 });
-                console.log(`[AUTH] Clicked at coordinates (${clickX}, ${clickY}).`);
-                await delay(8000); 
+                console.log(`[AUTH] Dispatching physical click to: ${clickX}, ${clickY}`);
+                await page.mouse.click(clickX, clickY, { delay: 200 });
+                
+                await delay(8000); // Wait for the "Claim" button to turn purple
             }
         } else {
-            console.log("[WARN] Still no Cloudflare iframe found. Check 1_before_claim.png to see if popup appeared.");
+            console.log("[WARN] Could not detect Cloudflare frame by URL. Checking Fallback...");
         }
 
         // 4. Click the "Claim" Button
-        console.log("[PROCESS] Scanning for enabled Claim button...");
+        console.log("[PROCESS] Attempting to click the Claim button...");
         const claimResult = await page.evaluate(() => {
             const btns = Array.from(document.querySelectorAll('button'));
-            const claimBtn = btns.find(b => b.innerText.toLowerCase().includes('claim 12,000'));
+            // Filter specifically for the daily claim button
+            const claimBtn = btns.find(b => b.innerText.includes('12,000'));
             
             if (claimBtn) {
                 if (!claimBtn.disabled) {
