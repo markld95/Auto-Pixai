@@ -1,7 +1,6 @@
 require('dotenv').config();
 const puppeteer = require("puppeteer-extra");
 const StealthPlugin = require("puppeteer-extra-plugin-stealth");
-const fs = require('fs');
 const axios = require('axios');
 puppeteer.use(StealthPlugin());
 
@@ -13,15 +12,6 @@ const LANG = process.env.APP_LANG || "en-GB";
 const shotPath = "/data/"; 
 
 function delay(time) { return new Promise((resolve) => setTimeout(resolve, time)); }
-
-// Function to unlock files for Unraid
-function unlockFile(path) {
-    try {
-        if (fs.existsSync(path)) {
-            fs.chmodSync(path, 0o777);
-        }
-    } catch (e) { console.warn(`[WARN] Could not set permissions on ${path}`); }
-}
 
 async function applyCookies(page, cookiesArray) {
     for (const cookie of cookiesArray) {
@@ -58,7 +48,7 @@ async function parseLocalCookies(cookieStr) {
 }
 
 async function run() {
-    console.log(`[INFO] Starting PixAI Auto-Claimer (Permissions & Position-Injection)`);
+    console.log(`[INFO] Starting PixAI Auto-Claimer (Shadow-Piercing Mode)`);
     const browser = await puppeteer.launch({ 
         headless: "new",
         executablePath: isDocker ? "/usr/bin/google-chrome" : undefined,
@@ -78,33 +68,55 @@ async function run() {
         await page.goto(url, { waitUntil: "networkidle2" });
         await delay(12000); 
 
-        const beforeFile = `${shotPath}1_before_claim.png`;
-        await page.screenshot({ path: beforeFile, fullPage: true });
-        unlockFile(beforeFile); // Unlock it immediately
+        await page.screenshot({ path: `${shotPath}1_before_claim.png`, fullPage: true });
 
-        console.log("[PROCESS] Locating Turnstile position via JS injection...");
+        // --- NEW STRATEGY: Deep Shadow DOM Search ---
+        console.log("[PROCESS] Piercing Shadow DOM to find Turnstile...");
         const rect = await page.evaluate(() => {
-            const iframe = Array.from(document.querySelectorAll('iframe')).find(f => 
-                f.src.includes('cloudflare.com') || f.src.includes('turnstile')
-            );
+            function findInShadow(root, selector) {
+                // Check current root
+                const el = root.querySelector(selector);
+                if (el) return el;
+                
+                // Search all children and their shadows
+                const children = root.querySelectorAll('*');
+                for (const child of children) {
+                    if (child.shadowRoot) {
+                        const found = findInShadow(child.shadowRoot, selector);
+                        if (found) return found;
+                    }
+                }
+                return null;
+            }
+
+            // Look for any iframe with cloudflare/turnstile in the URL
+            const iframe = findInShadow(document, 'iframe[src*="cloudflare"], iframe[src*="turnstile"]');
+            
             if (!iframe) return null;
             const box = iframe.getBoundingClientRect();
-            // Check if it's actually visible
-            if (box.width === 0 || box.height === 0) return null;
             return { x: box.left, y: box.top, width: box.width, height: box.height };
         });
 
-        if (rect) {
-            console.log(`[AUTH] Target found at (${rect.x}, ${rect.y}). Clicking...`);
-            const clickX = rect.x + 30;
-            const clickY = rect.y + (rect.height / 2);
-            await page.mouse.click(clickX, clickY, { delay: 250 });
+        if (rect && rect.width > 0) {
+            console.log(`[AUTH] Target found at (${Math.round(rect.x)}, ${Math.round(rect.y)}). Clicking...`);
+            
+            // Offset to hit the checkbox (approx 35px from left of iframe)
+            const clickX = Math.round(rect.x + 35);
+            const clickY = Math.round(rect.y + (rect.height / 2));
+            
+            await page.mouse.click(clickX, clickY, { delay: 200 });
+            console.log("[AUTH] Click dispatched. Waiting 8s for processing...");
             await delay(8000); 
         } else {
-            console.log("[WARN] Cloudflare iframe not found or hidden.");
+            console.log("[WARN] Turnstile not found. Trying "Center-of-Modal" blind click fallback...");
+            // As a last resort, we click where the checkbox is USUALLY located in this specific modal
+            // Based on your 1280x1024 screenshots, the box is approx at x:470, y:700
+            await page.mouse.click(470, 705, { delay: 200 });
+            await delay(8000);
         }
 
-        console.log("[PROCESS] Finalizing Claim...");
+        // 4. Click the "Claim" Button
+        console.log("[PROCESS] Checking Claim button status...");
         const claimResult = await page.evaluate(() => {
             const btns = Array.from(document.querySelectorAll('button'));
             const claimBtn = btns.find(b => b.innerText.includes('12,000'));
@@ -112,15 +124,16 @@ async function run() {
                 claimBtn.click();
                 return "CLICKED";
             }
-            return claimBtn ? "DISABLED" : "NOT_FOUND";
+            return claimBtn ? "STILL_DISABLED" : "NOT_FOUND";
         });
 
         console.log(`[PROCESS] Button Status: ${claimResult}`);
-        if (claimResult === "CLICKED") await delay(5000);
+        if (claimResult === "CLICKED") {
+            console.log("[SUCCESS] Credits claimed!");
+            await delay(4000);
+        }
 
-        const afterFile = `${shotPath}2_after_claim.png`;
-        await page.screenshot({ path: afterFile, fullPage: true });
-        unlockFile(afterFile); // Unlock it immediately
+        await page.screenshot({ path: `${shotPath}2_after_claim.png`, fullPage: true });
 
     } catch (e) { 
         console.error("[FATAL ERROR]", e.message); 
