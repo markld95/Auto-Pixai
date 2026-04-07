@@ -48,7 +48,7 @@ async function parseLocalCookies(cookieStr) {
 }
 
 async function run() {
-    console.log(`[INFO] Starting PixAI Auto-Claimer (Modal-Center Mode)`);
+    console.log(`[INFO] Starting PixAI Auto-Claimer (Aria-Targeting Mode)`);
     const browser = await puppeteer.launch({ 
         headless: "new",
         executablePath: isDocker ? "/usr/bin/google-chrome" : undefined,
@@ -70,40 +70,52 @@ async function run() {
 
         await page.screenshot({ path: `${shotPath}1_before_claim.png`, fullPage: true });
 
-        console.log("[PROCESS] Dispatching recalibrated click to Turnstile...");
-        
-        // Recalibrated for 1280x1024. 
-        // The modal is roughly 400px wide, centered. 
-        // The checkbox is on the left-ish side of the modal.
-        const targetX = 485; 
-        const targetY = 702;
-
-        await page.mouse.move(targetX, targetY);
-        await delay(200);
-        await page.mouse.down();
-        await delay(150);
-        await page.mouse.up();
-
-        console.log(`[AUTH] Clicked at ${targetX}, ${targetY}. Waiting for verification...`);
-        await delay(12000); 
+        // --- NEW: ARIA SEARCH ---
+        console.log("[PROCESS] Searching for element with label 'Verify you are human'...");
+        try {
+            // Find the element by its accessibility label
+            const turnstile = await page.waitForSelector('aria/Verify you are human', { timeout: 10000 });
+            
+            if (turnstile) {
+                const rect = await turnstile.boundingBox();
+                if (rect) {
+                    console.log(`[AUTH] Aria Target found at (${Math.round(rect.x)}, ${Math.round(rect.y)}). Clicking...`);
+                    
+                    // The checkbox is usually 25-35 pixels to the LEFT of the center of the text
+                    const clickX = rect.x + 25; 
+                    const clickY = rect.y + (rect.height / 2);
+                    
+                    await page.mouse.click(clickX, clickY, { delay: 200 });
+                    console.log("[AUTH] Clicked label-relative coordinates. Waiting 10s...");
+                    await delay(10000);
+                }
+            }
+        } catch (e) {
+            console.log("[WARN] Aria search failed. Modal might be 'shielded'. Reverting to brute-force cluster...");
+            // One last broad-area click attempt around the most likely modal center
+            for (let x = 460; x <= 500; x += 20) {
+                for (let y = 690; y <= 710; y += 10) {
+                    await page.mouse.click(x, y);
+                    await delay(200);
+                }
+            }
+            await delay(10000);
+        }
 
         console.log("[PROCESS] Checking Claim button status...");
         const claimResult = await page.evaluate(() => {
             const btns = Array.from(document.querySelectorAll('button'));
             const claimBtn = btns.find(b => b.innerText.includes('12,000'));
-            if (claimBtn) {
-                if (!claimBtn.disabled) {
-                    claimBtn.click();
-                    return "CLICKED";
-                }
-                return "STILL_DISABLED";
+            if (claimBtn && !claimBtn.disabled) {
+                claimBtn.click();
+                return "CLICKED";
             }
-            return "NOT_FOUND";
+            return claimBtn ? "STILL_DISABLED" : "NOT_FOUND";
         });
 
         console.log(`[PROCESS] Button Status: ${claimResult}`);
         if (claimResult === "CLICKED") {
-            console.log("[SUCCESS] Credits claimed successfully!");
+            console.log("[SUCCESS] Credits claimed!");
             await delay(5000);
         }
 
