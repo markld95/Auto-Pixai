@@ -9,7 +9,6 @@ const COOKIE_STRING = process.env.PIXAI_COOKIE || "";
 const isDocker = process.env.IS_DOCKER !== 'false';
 const LANG = process.env.APP_LANG || "en-GB";
 
-// Ensure screenshot directory exists
 const shotDir = '/screenshots';
 if (isDocker && !fs.existsSync(shotDir)) {
     fs.mkdirSync(shotDir, { recursive: true });
@@ -24,21 +23,34 @@ async function applyCookies(page) {
         console.error("[ERROR] No PIXAI_COOKIE found.");
         return;
     }
-    const cookies = COOKIE_STRING.split(";").map(c => {
-        const [name, ...rest] = c.trim().split("=");
-        return {
-            name,
-            value: rest.join("="),
-            domain: ".pixai.art",
-            path: "/"
+    
+    const cookieArray = COOKIE_STRING.split(';').filter(c => c.trim().length > 0);
+    
+    for (const cookie of cookieArray) {
+        const parts = cookie.trim().split('=');
+        if (parts.length < 2) continue;
+        
+        const name = parts[0].trim();
+        const value = parts.slice(1).join('=').trim();
+
+        const cookieParams = {
+            name: name,
+            value: value,
+            path: '/',
+            secure: true,
+            sameSite: 'Lax'
         };
-    });
-    await page.setCookie(...cookies);
-    console.log("[AUTH] Cookies applied to session.");
+
+        // Set for both potential domains to ensure the session 'sticks'
+        await page.setCookie({ ...cookieParams, domain: '.pixai.art' });
+        await page.setCookie({ ...cookieParams, domain: 'pixai.art' });
+    }
+    
+    console.log(`[AUTH] Injected ${cookieArray.length} cookies into session.`);
 }
 
 async function run() {
-    console.log("[INFO] Starting PixAI Auto-Claimer (Precision Mode)...");
+    console.log("[INFO] Starting PixAI Auto-Claimer (Session-Fix Mode)...");
 
     const config = { 
         headless: "new",
@@ -55,12 +67,17 @@ async function run() {
     await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36");
 
     try {
-        console.log("[NAV] Navigating to PixAI...");
+        // Initial load to set the domain context
+        console.log("[NAV] Initializing domain...");
         await page.goto(url, { waitUntil: "networkidle2" });
         
+        // Apply cookies and reload to activate session
         await applyCookies(page);
+        console.log("[NAV] Reloading with active session...");
         await page.reload({ waitUntil: "networkidle2" });
-        console.log("[AUTH] Session active. Waiting for Cloudflare/Popup...");
+        
+        // Extra 5s wait to let the UI update from "Sign in" to "Profile"
+        await delay(5000);
 
         let claimed = false;
         const maxAttempts = 15; 
@@ -68,7 +85,6 @@ async function run() {
         for (let i = 0; i < maxAttempts; i++) {
             console.log(`[PROCESS] Scan attempt ${i + 1}/${maxAttempts}...`);
             
-            // Check for the "Claim" button
             const targetFound = await page.evaluate(() => {
                 const keywords = ['claim', 'get', 'collect', 'check-in', 'receive'];
                 const elements = Array.from(document.querySelectorAll('button, div[role="button"], span, a'));
@@ -79,23 +95,22 @@ async function run() {
                     
                     const hasKeyword = keywords.some(k => text.includes(k));
                     const isNotInvite = !text.includes('invite') && !text.includes('rebate');
-                    const hasNumbers = /\d/.test(text); // Looks for "10,000" or similar
+                    const hasNumbers = /\d/.test(text);
 
                     return hasKeyword && isVisible && isNotInvite && hasNumbers;
                 });
 
                 if (btn) {
-                    btn.scrollIntoView();
                     btn.click();
                     return { success: true, text: btn.innerText.trim() };
                 }
-                return { success: false };
+                return false;
             });
 
-            if (targetFound.success) {
+            if (targetFound && targetFound.success) {
                 console.log(`[SUCCESS] Found and clicked: "${targetFound.text}"`);
                 claimed = true;
-                await delay(3000); // Wait for click to register
+                await delay(5000); // Wait for the "Claimed" animation to finish
                 break;
             }
 
@@ -103,16 +118,15 @@ async function run() {
         }
 
         if (!claimed) {
-            console.log("[CRITICAL] Claim button not found after 30s.");
+            console.log("[CRITICAL] Claim button not found. Check if logged in in screenshot.");
         }
 
     } catch (error) {
         console.error("[FATAL ERROR]", error.message);
     } finally {
-        // ALWAYS save the final state so you can see if the button changed to "Claimed"
         if (isDocker) {
             await page.screenshot({ path: `${shotDir}/last_run_state.png`, fullPage: true });
-            console.log("[DEBUG] Final screenshot saved (overwriting last run).");
+            console.log("[DEBUG] Final screenshot saved to verify login state.");
         }
         await browser.close();
         console.log("[EXIT] Process completed.");
