@@ -11,7 +11,7 @@ const FS_URL = process.env.FLARESOLVERR_URL || "";
 const isDocker = process.env.IS_DOCKER !== 'false';
 const LANG = process.env.APP_LANG || "en-GB";
 
-// Hardcoded to the mount point you'll set in Unraid
+// Saving directly to /data/ which you mapped to /mnt/user/appdata/auto-pixai
 const shotPath = "/data/"; 
 
 function delay(time) { return new Promise((resolve) => setTimeout(resolve, time)); }
@@ -51,82 +51,86 @@ async function parseLocalCookies(cookieStr) {
 }
 
 async function run() {
-    console.log(`[INFO] Starting PixAI Auto-Claimer (Internal Path: ${shotPath})`);
+    console.log(`[INFO] Starting PixAI Auto-Claimer (Turnstile Precision Mode)`);
     const browser = await puppeteer.launch({ 
         headless: "new",
         executablePath: isDocker ? "/usr/bin/google-chrome" : undefined,
         args: isDocker ? ["--disable-gpu", "--no-sandbox", "--disable-dev-shm-usage", `--lang=${LANG}`] : []
     });
+    
     const page = await browser.newPage();
     await page.setViewport({ width: 1280, height: 1024 });
-    await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36");
+    const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+    await page.setUserAgent(UA);
 
     try {
+        // 1. Initial Load & Login
         await page.goto("https://pixai.art", { waitUntil: "networkidle2" });
-        
         const localCookies = await parseLocalCookies(COOKIE_STRING);
         await applyCookies(page, localCookies);
         console.log(`[AUTH] Injected ${localCookies.length} user cookies.`);
 
+        // 2. FlareSolverr (For initial bypass if needed)
         if (FS_URL) {
-            console.log(`[PROXY] Requesting clearance from FlareSolverr...`);
             try {
-                const fsRes = await axios.post(FS_URL, {
-                    cmd: "sessions.create", url: "https://pixai.art", maxTimeout: 60000
-                }, { timeout: 65000 });
-                if (fsRes.data.solution) {
-                    await applyCookies(page, fsRes.data.solution.cookies);
-                    console.log("[PROXY] FlareSolverr clearance applied.");
-                }
-            } catch (e) { console.warn("[WARN] FlareSolverr failed, using manual fallback."); }
+                const fsRes = await axios.post(FS_URL, { cmd: "sessions.create", url: "https://pixai.art", maxTimeout: 60000 });
+                if (fsRes.data.solution) await applyCookies(page, fsRes.data.solution.cookies);
+            } catch (e) { console.warn("[WARN] FlareSolverr skipped/failed."); }
         }
 
+        // 3. Navigate to Generator and wait for Popup
         console.log("[NAV] Navigating to Generator...");
         await page.goto(url, { waitUntil: "networkidle2" });
-        await delay(8000);
+        await delay(10000); 
 
-        // --- BEFORE SCREENSHOT ---
+        // BEFORE SCREENSHOT
         await page.screenshot({ path: `${shotPath}1_before_claim.png`, fullPage: true });
 
-        const cfFrame = page.frames().find(f => f.url().includes('cloudflare'));
+        // 4. Handle Cloudflare Turnstile inside the Popup
+        console.log("[PROCESS] Hunting for Cloudflare Turnstile frame...");
+        const frames = page.frames();
+        const cfFrame = frames.find(f => f.url().includes('cloudflare') || f.url().includes('turnstile'));
+
         if (cfFrame) {
-            console.log("[AUTH] Turnstile detected. Attempting precision click...");
+            console.log("[AUTH] Turnstile frame found. Attempting to click checkbox...");
             try {
-                const box = await cfFrame.waitForSelector('#challenge-stage', { timeout: 5000 });
-                const rect = await box.boundingBox();
-                if (rect) {
-                    await page.mouse.click(rect.x + rect.width / 2, rect.y + rect.height / 2);
-                    await delay(6000);
+                // Find the checkbox container inside the frame
+                const checkbox = await cfFrame.waitForSelector('#challenge-stage', { timeout: 8000 });
+                if (checkbox) {
+                    const rect = await checkbox.boundingBox();
+                    if (rect) {
+                        // Use physical mouse click at coordinates
+                        await page.mouse.click(rect.x + rect.width / 2, rect.y + rect.height / 2);
+                        console.log("[AUTH] Checkbox clicked. Waiting for validation...");
+                        await delay(6000); // Wait for button to enable
+                    }
                 }
-            } catch (e) { console.log("[INFO] CF click skipped."); }
-        }
-
-        let claimed = false;
-        for (let i = 0; i < 10; i++) {
-            console.log(`[PROCESS] Scan attempt ${i + 1}/10...`);
-            const result = await page.evaluate(() => {
-                const elements = Array.from(document.querySelectorAll('button, div[role="button"], span'));
-                const btn = elements.find(el => {
-                    const t = el.innerText.toLowerCase();
-                    return (t.includes('claim') || t.includes('get')) && 
-                           el.offsetWidth > 0 && !t.includes('invite') && /\d/.test(t);
-                });
-                if (btn) { btn.click(); return btn.innerText.trim(); }
-                return null;
-            });
-
-            if (result) {
-                console.log(`[SUCCESS] Clicked: "${result}"`);
-                claimed = true;
-                await delay(5000);
-                break;
+            } catch (e) {
+                console.log("[INFO] Could not click checkbox (it may be auto-solving).");
             }
-            await delay(3000);
         }
 
-        // --- AFTER SCREENSHOT ---
+        // 5. Click the "Claim" Button
+        console.log("[PROCESS] Attempting to click the Claim button...");
+        const claimResult = await page.evaluate(() => {
+            const btns = Array.from(document.querySelectorAll('button'));
+            const claimBtn = btns.find(b => b.innerText.toLowerCase().includes('claim 12,000'));
+            if (claimBtn && !claimBtn.disabled) {
+                claimBtn.click();
+                return claimBtn.innerText.trim();
+            }
+            return null;
+        });
+
+        if (claimResult) {
+            console.log(`[SUCCESS] Claimed: ${claimResult}`);
+            await delay(5000);
+        } else {
+            console.log("[FAIL] Claim button was not found, not enabled, or already clicked.");
+        }
+
+        // AFTER SCREENSHOT
         await page.screenshot({ path: `${shotPath}2_after_claim.png`, fullPage: true });
-        console.log(`[DEBUG] Proof saved to ${shotPath}`);
 
     } catch (e) { console.error("[FATAL ERROR]", e.message); }
     finally { 
