@@ -32,9 +32,7 @@ async function parseLocalCookies(cookieStr) {
 
     let decoded = cookieStr;
 
-    // Keep your existing base64 support:
-    // if it does not look like Netscape tabs and does not look like raw cookie pairs,
-    // treat it as base64 and decode it.
+    // Preserve your existing base64-or-raw logic.
     if (!cookieStr.includes('\t') && !cookieStr.includes('=')) {
         decoded = Buffer.from(cookieStr, 'base64').toString('utf-8');
     }
@@ -65,31 +63,28 @@ async function isDailyClaimModalThere(page) {
 async function getClaimButtonInfo(page) {
     return await page.evaluate(() => {
         const buttons = Array.from(document.querySelectorAll('button'));
+        const claimBtn = buttons.find(b => /claim/i.test((b.innerText || '').trim()));
+        if (!claimBtn) return null;
 
-        const candidates = buttons.map((b, idx) => ({
-            index: idx,
-            text: (b.innerText || '').trim(),
-            disabled: !!b.disabled,
-            visible: !!(b.offsetWidth || b.offsetHeight || b.getClientRects().length)
-        }));
-
-        const claim = candidates.find(b => /claim/i.test(b.text) && b.visible);
-        return claim || null;
+        return {
+            text: (claimBtn.innerText || '').trim(),
+            disabled: !!claimBtn.disabled
+        };
     });
 }
 
 async function clickClaimButton(page) {
-    const clicked = await page.evaluate(() => {
+    return await page.evaluate(() => {
         const buttons = Array.from(document.querySelectorAll('button'));
         const claimBtn = buttons.find(b => /claim/i.test((b.innerText || '').trim()));
+
         if (claimBtn && !claimBtn.disabled) {
             claimBtn.click();
             return "SUCCESS";
         }
+
         return claimBtn ? "STILL_DISABLED" : "NOT_FOUND";
     });
-
-    return clicked;
 }
 
 async function waitForClaimEnabled(page, timeout = 25000) {
@@ -100,103 +95,101 @@ async function waitForClaimEnabled(page, timeout = 25000) {
     }, { timeout });
 }
 
-async function findTurnstileFrame(page, timeout = 20000) {
-    const start = Date.now();
+async function getTurnstileHostHandle(page) {
+    let host = await page.$('#cf-turnstile');
+    if (host) return host;
 
-    while (Date.now() - start < timeout) {
-        const iframes = await page.$$('iframe');
-
-        for (const iframeHandle of iframes) {
-            try {
-                const src = await page.evaluate(el => el.src || '', iframeHandle);
-                if (src.includes('challenges.cloudflare.com') || src.includes('turnstile')) {
-                    const frame = await iframeHandle.contentFrame();
-                    return { iframeHandle, frame, src };
-                }
-            } catch (e) {}
-        }
-
-        await delay(500);
+    const hiddenInput = await page.$('input[name="cf-turnstile-response"]');
+    if (hiddenInput) {
+        const parent = await hiddenInput.evaluateHandle(el => el.parentElement);
+        const asElement = parent.asElement();
+        if (asElement) return asElement;
     }
+
+    const verifyRow = await page.evaluateHandle(() => {
+        const all = Array.from(document.querySelectorAll('body *'));
+        return all.find(el => /verify you are human/i.test(el.innerText || '')) || null;
+    });
+    const verifyRowEl = verifyRow.asElement();
+    if (verifyRowEl) return verifyRowEl;
 
     return null;
 }
 
-async function tryClickTurnstileInsideFrame(frame) {
-    if (!frame) return false;
+async function clickTurnstileHost(page) {
+    const host = await getTurnstileHostHandle(page);
 
-    const selectors = [
-        'input[type="checkbox"]',
-        '[role="checkbox"]',
-        'label',
-        'div[role="button"]'
-    ];
-
-    for (const selector of selectors) {
-        try {
-            const el = await frame.$(selector);
-            if (el) {
-                await el.click({ delay: 80 });
-                return true;
-            }
-        } catch (e) {}
-    }
-
-    return false;
-}
-
-async function tryClickTurnstileByIframeBox(page, iframeHandle) {
-    if (!iframeHandle) return false;
-
-    try {
-        const box = await iframeHandle.boundingBox();
-        if (!box) return false;
-
-        // Click relative to the iframe, not the full page.
-        // This is still a fallback, but much safer than fixed absolute coordinates.
-        const targetX = box.x + Math.max(30, Math.min(box.width * 0.2, box.width - 10));
-        const targetY = box.y + (box.height / 2);
-
-        await page.mouse.move(targetX - 10, targetY - 6, { steps: 10 });
-        await delay(120);
-        await page.mouse.move(targetX, targetY, { steps: 8 });
-        await delay(120);
-        await page.mouse.click(targetX, targetY, { delay: 100 });
-
-        return true;
-    } catch (e) {
+    if (!host) {
+        console.log("[AUTH] Turnstile host not found.");
         return false;
     }
+
+    const box = await host.boundingBox();
+
+    if (!box) {
+        console.log("[AUTH] Turnstile host found but bounding box unavailable.");
+        return false;
+    }
+
+    console.log(`[AUTH] Turnstile host box: x=${Math.round(box.x)}, y=${Math.round(box.y)}, w=${Math.round(box.width)}, h=${Math.round(box.height)}`);
+
+    // Click the left side of the Turnstile box where the checkbox lives.
+    const targetX = box.x + Math.min(26, Math.max(18, box.width * 0.08));
+    const targetY = box.y + (box.height / 2);
+
+    console.log(`[AUTH] Turnstile click target: ${Math.round(targetX)}, ${Math.round(targetY)}`);
+
+    await page.mouse.move(targetX - 12, targetY - 6, { steps: 12 });
+    await delay(150);
+    await page.mouse.move(targetX, targetY, { steps: 10 });
+    await delay(120);
+    await page.mouse.click(targetX, targetY, { delay: 100 });
+
+    return true;
+}
+
+async function getTurnstileResponseValue(page) {
+    return await page.evaluate(() => {
+        const el = document.querySelector('input[name="cf-turnstile-response"]');
+        return el ? (el.value || '') : '';
+    });
+}
+
+async function waitForTurnstileResponse(page, timeout = 15000) {
+    await page.waitForFunction(() => {
+        const el = document.querySelector('input[name="cf-turnstile-response"]');
+        return !!(el && el.value && el.value.trim().length > 0);
+    }, { timeout });
 }
 
 async function solveTurnstile(page) {
-    console.log("[PROCESS] Locating Cloudflare verification iframe...");
+    console.log("[PROCESS] Locating Cloudflare verification host...");
 
-    const result = await findTurnstileFrame(page, 25000);
-
-    if (!result) {
-        console.log("[AUTH] Turnstile iframe not found.");
+    const host = await getTurnstileHostHandle(page);
+    if (!host) {
+        console.log("[AUTH] Turnstile host not found.");
         return false;
     }
 
-    console.log("[AUTH] Turnstile iframe detected.");
+    console.log("[AUTH] Turnstile host detected.");
 
-    const clickedInsideFrame = await tryClickTurnstileInsideFrame(result.frame);
-    if (clickedInsideFrame) {
-        console.log("[AUTH] Verification click sent inside iframe.");
-        return true;
+    const clicked = await clickTurnstileHost(page);
+    if (!clicked) {
+        console.log("[AUTH] Verification click failed.");
+        return false;
     }
 
-    console.log("[AUTH] Direct iframe selectors failed. Trying iframe-relative click...");
-    const clickedByBox = await tryClickTurnstileByIframeBox(page, result.iframeHandle);
+    console.log("[AUTH] Verification click sent.");
 
-    if (clickedByBox) {
-        console.log("[AUTH] Verification click sent via iframe-relative position.");
+    try {
+        await waitForTurnstileResponse(page, 12000);
+        const response = await getTurnstileResponseValue(page);
+        console.log(`[AUTH] Turnstile response detected (${response.length} chars).`);
+        return true;
+    } catch (e) {
+        console.log("[AUTH] No Turnstile response token detected after click.");
         return true;
     }
-
-    console.log("[AUTH] Verification click failed.");
-    return false;
 }
 
 async function run() {
@@ -232,7 +225,6 @@ async function run() {
         await waitForDailyClaimModal(page, 30000);
 
         const isModalThere = await isDailyClaimModalThere(page);
-
         if (!isModalThere) {
             console.log("[INFO] Popup not detected. Likely already claimed.");
             return;
