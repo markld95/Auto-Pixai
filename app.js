@@ -39,7 +39,7 @@ async function parseLocalCookies(cookieStr) {
 }
 
 async function run() {
-    console.log(`[INFO] Starting PixAI Auto-Claimer`);
+    console.log(`[INFO] Starting PixAI Auto-Claimer (Visual-Anchor Mode)`);
     const browser = await puppeteer.launch({ 
         headless: "new",
         executablePath: isDocker ? "/usr/bin/google-chrome" : undefined,
@@ -59,27 +59,43 @@ async function run() {
         await page.goto(url, { waitUntil: "networkidle2" });
         await delay(15000); 
 
-        const isModalThere = await page.evaluate(() => document.body.innerText.includes('Daily Claim'));
-
-        if (!isModalThere) {
-            console.log("[INFO] Popup not detected. Likely already claimed.");
-            return; 
-        }
-
-        console.log("[PROCESS] Executing Wide-Sweeper verification grid...");
+        // Visual Evidence
         await page.screenshot({ path: `${shotPath}1_before_claim.png` });
 
-        // RECALIBRATED GRID: Moving slightly left and further down
-        // Area: X(370-410), Y(690-730)
-        for (let x = 375; x <= 405; x += 15) {
-            for (let y = 700; y <= 730; y += 15) {
-                console.log(`[AUTH] Target: ${x}, ${y}`);
-                await page.mouse.click(x, y);
-                await delay(600); // Slower delay to help registration
+        // --- NEW: Visual Anchor Search ---
+        console.log("[PROCESS] Searching for the Cloudflare widget anchor...");
+        const anchor = await page.evaluate(() => {
+            // Find all iframes and look for the one containing Turnstile
+            const frames = Array.from(document.querySelectorAll('iframe'));
+            const cfFrame = frames.find(f => f.src.includes('cloudflare.com') || f.getAttribute('title')?.includes('widget'));
+            
+            if (cfFrame) {
+                const rect = cfFrame.getBoundingClientRect();
+                return { x: rect.left, y: rect.top, w: rect.width, h: rect.height };
+            }
+            return null;
+        });
+
+        if (anchor && anchor.w > 0) {
+            console.log(`[AUTH] Anchor found at ${Math.round(anchor.x)}, ${Math.round(anchor.y)}. Target verified.`);
+            // The actual checkbox is roughly at the start (left side) of this iframe
+            const clickX = anchor.x + 30; 
+            const clickY = anchor.y + (anchor.h / 2);
+            
+            await page.mouse.click(clickX, clickY);
+            console.log(`[AUTH] Clicked center-left of anchor: ${Math.round(clickX)}, ${Math.round(clickY)}`);
+        } else {
+            console.log("[WARN] No anchor found. Falling back to wide-net sweep...");
+            // If we can't "see" it via code, we sweep the area identified in your previous screenshots
+            for (let x = 370; x <= 410; x += 10) {
+                for (let y = 705; y <= 735; y += 10) {
+                    await page.mouse.click(x, y);
+                    await delay(300);
+                }
             }
         }
 
-        console.log("[WAIT] Processing (15s)...");
+        console.log("[WAIT] Verifying...");
         await delay(15000); 
 
         const claimResult = await page.evaluate(() => {
@@ -89,11 +105,10 @@ async function run() {
                 claimBtn.click();
                 return "SUCCESS";
             }
-            return claimBtn ? "STILL_DISABLED" : "NOT_FOUND";
+            return "STILL_DISABLED";
         });
 
         console.log(`[RESULT] Claim Status: ${claimResult}`);
-        await delay(5000);
         await page.screenshot({ path: `${shotPath}2_after_claim.png` });
 
     } catch (e) { 
