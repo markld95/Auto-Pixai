@@ -32,7 +32,7 @@ async function parseLocalCookies(cookieStr) {
 
     let decoded = cookieStr;
 
-    // Preserve your existing base64-or-raw logic.
+    // Preserve your existing base64-or-raw logic
     if (!cookieStr.includes('\t') && !cookieStr.includes('=')) {
         decoded = Buffer.from(cookieStr, 'base64').toString('utf-8');
     }
@@ -50,7 +50,7 @@ async function parseLocalCookies(cookieStr) {
     }).filter(c => c.name && c.value !== undefined && c.domain);
 }
 
-async function waitForDailyClaimModal(page, timeout = 30000) {
+async function waitForDailyClaimModal(page, timeout = 12000) {
     await page.waitForFunction(() => {
         return document.body && document.body.innerText.includes('Daily Claim');
     }, { timeout });
@@ -58,6 +58,13 @@ async function waitForDailyClaimModal(page, timeout = 30000) {
 
 async function isDailyClaimModalThere(page) {
     return await page.evaluate(() => document.body.innerText.includes('Daily Claim'));
+}
+
+async function isAlreadyClaimedState(page) {
+    return await page.evaluate(() => {
+        const text = document.body ? document.body.innerText : '';
+        return /Next reward available/i.test(text) || /Credits claimed!/i.test(text);
+    });
 }
 
 async function getClaimButtonInfo(page) {
@@ -133,7 +140,6 @@ async function clickTurnstileHost(page) {
 
     console.log(`[AUTH] Turnstile host box: x=${Math.round(box.x)}, y=${Math.round(box.y)}, w=${Math.round(box.width)}, h=${Math.round(box.height)}`);
 
-    // Click the left side of the Turnstile box where the checkbox lives.
     const targetX = box.x + Math.min(26, Math.max(18, box.width * 0.08));
     const targetY = box.y + (box.height / 2);
 
@@ -155,7 +161,7 @@ async function getTurnstileResponseValue(page) {
     });
 }
 
-async function waitForTurnstileResponse(page, timeout = 15000) {
+async function waitForTurnstileResponse(page, timeout = 12000) {
     await page.waitForFunction(() => {
         const el = document.querySelector('input[name="cf-turnstile-response"]');
         return !!(el && el.value && el.value.trim().length > 0);
@@ -222,15 +228,32 @@ async function run() {
         await page.goto(url, { waitUntil: "networkidle2" });
 
         console.log("[WAIT] Waiting for Daily Claim modal...");
-        await waitForDailyClaimModal(page, 30000);
 
-        const isModalThere = await isDailyClaimModalThere(page);
+        let isModalThere = false;
+        try {
+            await waitForDailyClaimModal(page, 12000);
+            isModalThere = await isDailyClaimModalThere(page);
+        } catch (e) {
+            isModalThere = false;
+        }
+
         if (!isModalThere) {
-            console.log("[INFO] Popup not detected. Likely already claimed.");
+            const alreadyClaimed = await isAlreadyClaimedState(page);
+            if (alreadyClaimed) {
+                console.log("[INFO] Already claimed today.");
+            } else {
+                console.log("[INFO] Popup not detected. Likely already claimed.");
+            }
             return;
         }
 
         await page.screenshot({ path: `${shotPath}1_before_claim.png` });
+
+        if (await isAlreadyClaimedState(page)) {
+            console.log("[INFO] Already claimed today.");
+            await page.screenshot({ path: `${shotPath}2_after_claim.png` });
+            return;
+        }
 
         let claimInfo = await getClaimButtonInfo(page);
         if (claimInfo && !claimInfo.disabled) {
@@ -256,6 +279,12 @@ async function run() {
             await waitForClaimEnabled(page, 25000);
         } catch (e) {
             console.log("[WAIT] Claim button did not enable in time.");
+        }
+
+        if (await isAlreadyClaimedState(page)) {
+            console.log("[INFO] Already claimed today.");
+            await page.screenshot({ path: `${shotPath}2_after_claim.png` });
+            return;
         }
 
         claimInfo = await getClaimButtonInfo(page);
