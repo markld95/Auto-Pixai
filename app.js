@@ -27,26 +27,55 @@ async function applyCookies(page, cookiesArray) {
     }
 }
 
+// --- FIXED COOKIE PARSER ---
 async function parseLocalCookies(cookieStr) {
     if (!cookieStr) return [];
     let decoded = cookieStr;
+
+    // Check if it's Base64
     if (!cookieStr.includes('\t') && !cookieStr.includes('=')) {
-        decoded = Buffer.from(cookieStr, 'base64').toString('utf-8');
+        try {
+            decoded = Buffer.from(cookieStr, 'base64').toString('utf-8');
+        } catch (e) {
+            console.log("[ERROR] Failed to decode Base64 cookies.");
+            return [];
+        }
     }
-    const lines = decoded.split('\n').filter(l => l.trim() && !l.startsWith('#'));
-    return lines.map(line => {
-        const tabs = line.split('\t');
-        return {
-            name: tabs[5],
-            value: tabs[6],
-            domain: tabs[0],
-            path: tabs[2] || '/'
-        };
-    }).filter(c => c.name && c.value !== undefined && c.domain);
+
+    const lines = decoded.split('\n');
+    const cookies = [];
+
+    for (let line of lines) {
+        line = line.trim();
+        if (!line || line.startsWith('#')) continue;
+
+        const tabs = line.split(/\t+/); // Split by one or more tabs
+        if (tabs.length >= 7) {
+            // Standard Netscape Format
+            cookies.push({
+                domain: tabs[0],
+                path: tabs[2],
+                name: tabs[5],
+                value: tabs[6]
+            });
+        } else if (tabs.length >= 2) {
+            // Fallback for simple key=value pairs if present
+            cookies.push({
+                domain: ".pixai.art",
+                path: "/",
+                name: tabs[tabs.length - 2],
+                value: tabs[tabs.length - 1]
+            });
+        }
+    }
+    return cookies;
 }
 
 async function isDailyClaimModalThere(page) {
-    return await page.evaluate(() => document.body.innerText.includes('Daily Claim'));
+    return await page.evaluate(() => {
+        const text = document.body ? document.body.innerText : '';
+        return text.includes('Daily Claim') || text.includes('Reward');
+    });
 }
 
 async function isAlreadyClaimedState(page) {
@@ -59,17 +88,14 @@ async function isAlreadyClaimedState(page) {
 async function getTurnstileHostHandle(page) {
     let host = await page.$('#cf-turnstile');
     if (host) return host;
-
     const hiddenInput = await page.$('input[name="cf-turnstile-response"]');
     if (hiddenInput) {
         const parent = await hiddenInput.evaluateHandle(el => el.parentElement);
-        const asElement = parent.asElement();
-        if (asElement) return asElement;
+        return parent.asElement();
     }
-
     const verifyRow = await page.evaluateHandle(() => {
-        const all = Array.from(document.querySelectorAll('body *'));
-        return all.find(el => /verify you are human/i.test(el.innerText || '')) || null;
+        return Array.from(document.querySelectorAll('body *'))
+            .find(el => /verify you are human/i.test(el.innerText || '')) || null;
     });
     return verifyRow.asElement();
 }
@@ -77,44 +103,32 @@ async function getTurnstileHostHandle(page) {
 async function solveTurnstile(page) {
     console.log("[PROCESS] Locating Cloudflare verification host...");
     const host = await getTurnstileHostHandle(page);
-    if (!host) {
-        console.log("[AUTH] Turnstile host not found.");
-        return false;
-    }
+    if (!host) return false;
 
-    console.log("[AUTH] Turnstile host detected.");
     const box = await host.boundingBox();
-    if (!box) {
-        console.log("[AUTH] Bounding box unavailable.");
-        return false;
-    }
-
-    console.log(`[AUTH] Box: x=${Math.round(box.x)}, y=${Math.round(box.y)}, w=${Math.round(box.width)}, h=${Math.round(box.height)}`);
+    if (!box) return false;
 
     const targetX = box.x + Math.min(26, Math.max(18, box.width * 0.08));
     const targetY = box.y + (box.height / 2);
 
-    console.log(`[AUTH] Click target: ${Math.round(targetX)}, ${Math.round(targetY)}`);
-
     await page.mouse.move(targetX - 12, targetY - 6, { steps: 12 });
-    await delay(150);
+    await delay(100);
     await page.mouse.click(targetX, targetY, { delay: 100 });
 
     try {
         await page.waitForFunction(() => {
             const el = document.querySelector('input[name="cf-turnstile-response"]');
             return !!(el && el.value && el.value.trim().length > 0);
-        }, { timeout: 12000 });
+        }, { timeout: 15000 });
         console.log("[AUTH] Turnstile response detected.");
         return true;
     } catch (e) {
-        console.log("[AUTH] No token detected, proceeding anyway.");
-        return true;
+        return true; 
     }
 }
 
 async function run() {
-    console.log(`[INFO] Starting PixAI Auto-Claimer (Full Precision Debug)`);
+    console.log(`[INFO] Starting PixAI Auto-Claimer (Cookie Fix Mode)`);
 
     const browser = await puppeteer.launch({
         headless: "new",
@@ -127,32 +141,35 @@ async function run() {
 
     const page = await browser.newPage();
     await page.setViewport({ width: 1280, height: 1024 });
-    await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36");
 
     try {
+        // Initial load to set domain
         await page.goto("https://pixai.art", { waitUntil: "networkidle2" });
+
         const localCookies = await parseLocalCookies(COOKIE_STRING);
-        console.log(`[INFO] Parsed ${localCookies.length} cookies.`);
+        console.log(`[INFO] Parsed ${localCookies.length} cookies from PIXAI_COOKIE.`);
+        
+        if (localCookies.length === 0) {
+            console.log("[ERROR] Cookie parsing failed. Check your Base64 string.");
+        }
+
         await applyCookies(page, localCookies);
 
         console.log("[NAV] Moving to Generator...");
         await page.goto(url, { waitUntil: "networkidle2" });
 
-        // --- THE FIX: Take screenshot BEFORE the modal check fails ---
-        console.log("[DEBUG] Waiting 10s for initial load, then snapping screenshot...");
+        // Wait for page to settle and snap debug shot
         await delay(10000);
         await page.screenshot({ path: `${shotPath}debug_initial_load.png` });
 
-        console.log("[WAIT] Checking for Daily Claim modal...");
-        let isModalThere = await isDailyClaimModalThere(page);
+        const modalPresent = await isDailyClaimModalThere(page);
+        const claimed = await isAlreadyClaimedState(page);
+        const isLoggedIn = await page.evaluate(() => document.body.innerText.includes('Credits'));
 
-        if (!isModalThere) {
-            const alreadyClaimed = await isAlreadyClaimedState(page);
-            const isLoggedIn = await page.evaluate(() => document.body.innerText.includes('Credits'));
-
+        if (!modalPresent) {
             if (!isLoggedIn) {
-                console.log("[ERROR] Bot is LOGGED OUT. PIXAI_COOKIE is expired.");
-            } else if (alreadyClaimed) {
+                console.log("[ERROR] Bot is LOGGED OUT. Refresh your PIXAI_COOKIE.");
+            } else if (claimed) {
                 console.log("[INFO] Already claimed today.");
             } else {
                 console.log("[INFO] Popup not detected. Likely already claimed.");
@@ -160,14 +177,12 @@ async function run() {
             return;
         }
 
-        // Verification and Claiming
-        const solved = await solveTurnstile(page);
-        console.log("[WAIT] Processing verification...");
-        await delay(12000);
+        await solveTurnstile(page);
+        await delay(10000);
 
-        const claimResult = await page.evaluate(() => {
-            const buttons = Array.from(document.querySelectorAll('button'));
-            const claimBtn = buttons.find(b => /claim/i.test(b.innerText) || /\d+,000/.test(b.innerText));
+        const result = await page.evaluate(() => {
+            const btns = Array.from(document.querySelectorAll('button'));
+            const claimBtn = btns.find(b => /claim/i.test(b.innerText) || /\d+,000/.test(b.innerText));
             if (claimBtn && !claimBtn.disabled) {
                 claimBtn.click();
                 return "SUCCESS";
@@ -175,13 +190,12 @@ async function run() {
             return claimBtn ? "STILL_DISABLED" : "NOT_FOUND";
         });
 
-        console.log(`[RESULT] Claim Status: ${claimResult}`);
-        await delay(5000);
+        console.log(`[RESULT] Claim Status: ${result}`);
+        await delay(2000);
         await page.screenshot({ path: `${shotPath}2_after_claim.png` });
 
     } catch (e) {
         console.error("[FATAL ERROR]", e.message);
-        await page.screenshot({ path: `${shotPath}fatal_error.png` });
     } finally {
         await browser.close();
         console.log("[EXIT] Done.");
