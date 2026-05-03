@@ -8,9 +8,14 @@ puppeteer.use(StealthPlugin());
 
 // Configuration
 const URL = "https://pixai.art/en/generator/image";
+const LOGIN_URL = "https://pixai.art/login";
 const isDocker = process.env.IS_DOCKER !== 'false';
 const shotPath = "/data/"; // Where screenshots and cookies live
 const cookiesPath = path.join(shotPath, 'cookies.json');
+
+// Original authentication configuration
+const username = process.env.LOGINNAME ? process.env.LOGINNAME : undefined;
+const password = process.env.PASSWORD ? process.env.PASSWORD : undefined;
 
 /**
  * Utility to wait for a specified time
@@ -90,6 +95,45 @@ async function solveTurnstile(page) {
     return true;
 }
 
+/**
+ * Handles login if cookies are invalid or missing
+ */
+async function login(page, username, password) {
+    console.log("[AUTH] Navigating to login page...");
+    await page.goto(LOGIN_URL, { waitUntil: "networkidle2" });
+    await delay(3000);
+
+    // Click initial modal/popup
+    try {
+        await page.waitForSelector(
+            'div[id="root"] > div > div > div > div > div form > div > div button:last-of-type'
+        );
+        await delay(30);
+        await page.click(
+            'div[id="root"] > div > div > div > div > div form > div > div button:last-of-type'
+        );
+        await delay(3000);
+    } catch (e) {
+        // Ignore if popup doesn't appear
+    }
+
+    console.log("[AUTH] Entering credentials...");
+    await page.type("#email-input", username);
+    await page.type("#password-input", password);
+    await delay(300);
+    
+    await page.waitForSelector('button[type="submit"]');
+    await page.click('button[type="submit"]');
+    await delay(6000);
+
+    try {
+        await page.$eval('button[type="submit"]', (button) => button.click());
+        await delay(3000);
+    } catch (e) {
+        // Ignored
+    }
+}
+
 async function run() {
     console.log(`[INFO] Starting PixAI Auto-Claimer (JSON Mode)`);
 
@@ -110,27 +154,41 @@ async function run() {
     await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36");
 
     try {
+        let loggedInViaCookie = false;
+
         // 1. Load and Apply Cookies
         if (fs.existsSync(cookiesPath)) {
             const cookiesData = fs.readFileSync(cookiesPath, 'utf8');
             const cookies = JSON.parse(cookiesData);
             await page.setCookie(...cookies);
             console.log(`[INFO] Injected ${cookies.length} cookies from /data/cookies.json`);
+            
+            // Navigate to generator to check if session is valid
+            console.log("[NAV] Moving to Generator...");
+            await page.goto(URL, { waitUntil: "networkidle2" });
+            
+            const isLoggedIn = await page.evaluate(() => document.cookie.includes('user_token'));
+            if (isLoggedIn) {
+                loggedInViaCookie = true;
+                console.log("[INFO] Session is valid with cookies.");
+            } else {
+                console.log("[WARN] user_token not detected, cookie session might be expired.");
+            }
         } else {
-            throw new Error(`Critical: cookies.json not found at ${cookiesPath}`);
+            console.log(`[WARN] cookies.json not found at ${cookiesPath}`);
         }
 
-        // 2. Navigate to site
-        console.log("[NAV] Moving to Generator...");
-        await page.goto(URL, { waitUntil: "networkidle2" });
-
-        // 3. Verification Check (Are we logged in?)
-        const isLoggedIn = await page.evaluate(() => document.cookie.includes('user_token'));
-        if (!isLoggedIn) {
-            console.log("[WARN] user_token not detected in browser. Cookie session might be expired.");
+        // 2. Fallback to username/password login if cookies didn't work
+        if (!loggedInViaCookie) {
+            if (!username || !password) {
+                throw new Error("Critical: Cookies were invalid/missing, and no LOGINNAME/PASSWORD set in environment variables.");
+            }
+            await login(page, username, password);
+            // Go back to the main generator page after logging in
+            await page.goto(URL, { waitUntil: "networkidle2" });
         }
 
-        // 4. Handle Modal logic
+        // 3. Handle Modal logic
         await delay(5000); // Wait for modal to pop up naturally
         let isModalThere = await isDailyClaimModalThere(page);
 
@@ -146,7 +204,7 @@ async function run() {
 
         await page.screenshot({ path: `${shotPath}1_before_claim.png` });
 
-        // 5. Check if we need to solve Turnstile
+        // 4. Check if we need to solve Turnstile
         console.log("[PROCESS] Modal detected. Checking button status...");
         const alreadyClaimed = await isAlreadyClaimedState(page);
         if (alreadyClaimed) {
@@ -157,7 +215,7 @@ async function run() {
         // Attempt Turnstile solve
         await solveTurnstile(page);
 
-        // 6. Execute Claim
+        // 5. Execute Claim
         console.log("[WAIT] Attempting to click Claim...");
         const result = await clickClaimButton(page);
         console.log(`[RESULT] Claim Status: ${result}`);
