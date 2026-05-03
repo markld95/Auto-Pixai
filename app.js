@@ -84,7 +84,7 @@ async function solveTurnstile(page) {
 
     // Click target: slightly offset into the checkbox area
     const targetX = box.x + 25;
-    constY = box.y + (box.height / 2);
+    const targetY = box.y + (box.height / 2);
 
     await page.mouse.move(targetX, targetY, { steps: 10 });
     await page.mouse.click(targetX, targetY, { delay: 100 });
@@ -159,7 +159,7 @@ async function run() {
     await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36");
 
     try {
-        let loggedInViaCookie = false;
+        let needsLogin = false;
 
         // 1. Load and Apply Cookies
         if (fs.existsSync(cookiesPath)) {
@@ -173,44 +173,52 @@ async function run() {
             await page.goto(URL, { waitUntil: "networkidle2" });
             
             const isLoggedIn = await page.evaluate(() => document.cookie.includes('user_token'));
-            if (isLoggedIn) {
-                loggedInViaCookie = true;
-                console.log("[INFO] Session is valid with cookies.");
-            } else {
+            if (!isLoggedIn) {
                 console.log("[WARN] user_token not detected, cookie session might be expired.");
+                needsLogin = true;
+            } else {
+                console.log("[INFO] Session is valid with cookies.");
             }
         } else {
             console.log(`[WARN] cookies.json not found at ${cookiesPath}`);
+            needsLogin = true;
         }
 
-        // 2. Fallback to username/password login if cookies didn't work
-        if (!loggedInViaCookie) {
+        // If cookies are missing or invalid, log in
+        if (needsLogin) {
             if (!username || !password) {
                 throw new Error("Critical: Cookies were invalid/missing, and no LOGINNAME/PASSWORD set in environment variables.");
             }
             await loginAndSaveCookies(page, username, password);
-            // Go back to the main generator page after logging in
             await page.goto(URL, { waitUntil: "networkidle2" });
         }
 
-        // 3. Handle Modal logic
-        await delay(5000); // Wait for modal to pop up naturally
+        // 2. Handle Modal logic
+        await delay(5000);
         let isModalThere = await isDailyClaimModalThere(page);
 
+        // If the modal isn't there, we re-check or log in again to ensure session freshness
         if (!isModalThere) {
             if (await isAlreadyClaimedState(page)) {
                 console.log("[INFO] Already claimed today.");
+                return;
             } else {
-                console.log("[INFO] Daily Claim popup not detected.");
+                console.log("[WARN] Daily claim popup not detected, invalidating cookies and attempting re-login.");
+                
+                // Fallback to re-logging in and writing fresh cookies
+                if (!username || !password) {
+                    throw new Error("Critical: Session mismatch, and no LOGINNAME/PASSWORD set in environment variables.");
+                }
+                
+                await loginAndSaveCookies(page, username, password);
+                await page.goto(URL, { waitUntil: "networkidle2" });
+                await delay(5000); // Wait for the new page contents to load
             }
-            await page.screenshot({ path: `${shotPath}debug_no_modal.png` });
-            return;
         }
 
         await page.screenshot({ path: `${shotPath}1_before_claim.png` });
 
-        // 4. Check if we need to solve Turnstile
-        console.log("[PROCESS] Modal detected. Checking button status...");
+        // 3. Re-verify if claimed already after the potential re-login
         const alreadyClaimed = await isAlreadyClaimedState(page);
         if (alreadyClaimed) {
             console.log("[INFO] UI indicates already claimed.");
@@ -220,7 +228,7 @@ async function run() {
         // Attempt Turnstile solve
         await solveTurnstile(page);
 
-        // 5. Execute Claim
+        // 4. Execute Claim
         console.log("[WAIT] Attempting to click Claim...");
         const result = await clickClaimButton(page);
         console.log(`[RESULT] Claim Status: ${result}`);
