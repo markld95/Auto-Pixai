@@ -201,6 +201,9 @@ async function run() {
         if (!isModalThere) {
             if (await isAlreadyClaimedState(page)) {
                 console.log("[INFO] Already claimed today.");
+                // Even if already claimed, save active cookies to persist the session
+                const currentCookies = await page.cookies();
+                fs.writeFileSync(cookiesPath, JSON.stringify(currentCookies, null, 2));
                 return;
             } else {
                 console.log("[WARN] Daily claim popup not detected, invalidating cookies and attempting re-login.");
@@ -222,6 +225,9 @@ async function run() {
         const alreadyClaimed = await isAlreadyClaimedState(page);
         if (alreadyClaimed) {
             console.log("[INFO] UI indicates already claimed.");
+            // Save active cookies to persist the session
+            const currentCookies = await page.cookies();
+            fs.writeFileSync(cookiesPath, JSON.stringify(currentCookies, null, 2));
             return;
         }
 
@@ -232,6 +238,13 @@ async function run() {
         console.log("[WAIT] Attempting to click Claim...");
         const result = await clickClaimButton(page);
         console.log(`[RESULT] Claim Status: ${result}`);
+
+        // Save cookies at the very end of a successful execution so it is always up-to-date
+        if (result === "SUCCESS") {
+            const finalCookies = await page.cookies();
+            fs.writeFileSync(cookiesPath, JSON.stringify(finalCookies, null, 2));
+            console.log(`[INFO] Successfully claimed credits and updated ${finalCookies.length} cookies in /data/cookies.json`);
+        }
 
         await delay(3000);
         await page.screenshot({ path: `${shotPath}2_after_claim.png` });
